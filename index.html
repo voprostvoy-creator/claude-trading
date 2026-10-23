@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Trading</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #6b7280; --line: #e5e7eb;
+    --accent: #2563eb; --up: #059669; --down: #dc2626; --chip: #eef2ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --card: #171a21; --text: #e6e8ec; --muted: #9aa1ad; --line: #262a33;
+      --accent: #60a5fa; --up: #34d399; --down: #f87171; --chip: #1e2533;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card: #171a21; --text: #e6e8ec; --muted: #9aa1ad; --line: #262a33;
+    --accent: #60a5fa; --up: #34d399; --down: #f87171; --chip: #1e2533;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 32px 0 12px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .stat .value { font-size: 22px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .chart-box { position: relative; height: 320px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; white-space: nowrap; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip); font-size: 12px; white-space: nowrap; }
+  details summary { cursor: pointer; color: var(--accent); }
+  .reason { white-space: pre-wrap; margin-top: 6px; color: var(--text); }
+  .run { margin-bottom: 10px; }
+  .run .head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .run ul { margin: 8px 0 0; padding-left: 18px; }
+  .empty { color: var(--muted); padding: 12px 0; }
+  .alert { color: var(--down); font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Claude Trading</h1>
+  <div class="sub" id="sub">Загрузка…</div>
+
+  <div class="stats" id="stats"></div>
+
+  <h2>Стоимость портфеля</h2>
+  <div class="card"><div class="chart-box"><canvas id="equity"></canvas></div></div>
+
+  <h2>Открытые позиции</h2>
+  <div class="card table-wrap" id="positions"></div>
+
+  <h2>Сделки</h2>
+  <div class="card table-wrap" id="trades"></div>
+
+  <h2>Журнал запусков</h2>
+  <div id="runs"></div>
+</main>
+
+<script>
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtT = t => t ? new Date(t).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : "—";
+const money = v => v == null ? "—" : (v < 0 ? "−$" : "$") + Math.abs(v).toFixed(2);
+const signed = v => v == null ? "—" : `<span class="${v >= 0 ? "up" : "down"}">${v >= 0 ? "+" : "−"}$${Math.abs(v).toFixed(2)}</span>`;
+const sideChip = s => `<span class="chip ${s === "long" ? "up" : "down"}">${s === "long" ? "лонг" : "шорт"}</span>`;
+
+fetch("data/journal.json", {cache: "no-store"}).then(r => r.json()).then(render).catch(e => {
+  document.getElementById("sub").textContent = "Не удалось загрузить журнал: " + e;
+});
+
+function render(j) {
+  const snaps = j.snapshots, last = snaps[snaps.length - 1];
+  const equity = last ? last.equity : j.meta.start_equity;
+  const pnl = equity - j.meta.start_equity;
+  const closed = j.trades.filter(t => t.status === "closed");
+  const wins = closed.filter(t => (t.pnl ?? 0) > 0).length;
+
+  document.getElementById("sub").textContent =
+    `Старт ${fmtT(j.meta.started_at)} · инструменты: ${j.meta.instruments.join(", ")} · обновлено ${fmtT(last?.t)}`;
+
+  document.getElementById("stats").innerHTML = [
+    ["Портфель", money(equity)],
+    ["Результат", `${signed(pnl)} <span class="sub">${(pnl / j.meta.start_equity * 100).toFixed(1)}%</span>`],
+    ["Открыто позиций", (last?.positions || []).length],
+    ["Сделок закрыто", closed.length],
+    ["Прибыльных", closed.length ? `${wins} из ${closed.length}` : "—"],
+  ].map(([l, v]) => `<div class="card stat"><div class="label">${l}</div><div class="value">${v}</div></div>`).join("");
+
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue("--accent").trim(), muted = css.getPropertyValue("--muted").trim(),
+        line = css.getPropertyValue("--line").trim();
+  new Chart(document.getElementById("equity"), {
+    type: "line",
+    data: {
+      labels: snaps.map(s => fmtT(s.t)),
+      datasets: [
+        {label: "Портфель, $", data: snaps.map(s => s.equity), borderColor: accent, backgroundColor: accent,
+         pointRadius: snaps.length > 60 ? 0 : 3, tension: .25, borderWidth: 2},
+        {label: "Старт", data: snaps.map(() => j.meta.start_equity), borderColor: muted, borderDash: [5, 5],
+         pointRadius: 0, borderWidth: 1},
+      ],
+    },
+    options: {
+      maintainAspectRatio: false, interaction: {mode: "index", intersect: false},
+      plugins: {legend: {labels: {color: muted}}},
+      scales: {x: {ticks: {color: muted, maxTicksLimit: 8}, grid: {color: line}},
+               y: {ticks: {color: muted, callback: v => "$" + v}, grid: {color: line}}},
+    },
+  });
+
+  const pos = last?.positions || [];
+  document.getElementById("positions").innerHTML = pos.length ? `<table>
+    <tr><th>Инструмент</th><th>Сторона</th><th>Вход</th><th>Цена</th><th>Залог</th><th>PnL</th><th>Ликвидация</th></tr>
+    ${pos.map(p => `<tr><td>${esc(p.instrument)}</td><td>${sideChip(p.side)}</td><td class="num">${p.entry}</td>
+      <td class="num">${p.price}</td><td class="num">${money(p.margin)}</td><td class="num">${signed(p.upnl)}</td>
+      <td class="num">${p.liq ?? "—"}</td></tr>`).join("")}</table>` : `<div class="empty">Нет открытых позиций</div>`;
+
+  const trades = [...j.trades].reverse();
+  document.getElementById("trades").innerHTML = trades.length ? `<table>
+    <tr><th>#</th><th>Инструмент</th><th>Сторона</th><th>Открыта</th><th>Вход</th><th>Стоп / тейк</th><th>Плечо, залог</th><th>Выход</th><th>PnL</th><th>Причина</th></tr>
+    ${trades.map(t => `<tr>
+      <td>${t.id}</td><td>${esc(t.instrument)}</td><td>${sideChip(t.side)}</td><td class="num">${fmtT(t.opened_at)}</td>
+      <td class="num">${t.entry_price}</td><td class="num">${t.stop_loss} / ${t.take_profit ?? "—"}</td>
+      <td class="num">${t.leverage}x, ${money(t.margin)}</td>
+      <td class="num">${t.status === "open" ? '<span class="chip">открыта</span>' : `${t.exit_price ?? "—"}<div class="sub">${fmtT(t.closed_at)}</div>`}</td>
+      <td class="num">${t.status === "open" ? "—" : signed(t.pnl)}</td>
+      <td><details><summary>почему</summary><div class="reason">${esc(t.reason)}${
+        t.close_reason ? "\n\nЗакрытие: " + esc(t.close_reason) : ""}${
+        (t.updates || []).map(u => `\n${fmtT(u.t)}: ${esc(u.note)}`).join("")}</div></details></td>
+    </tr>`).join("")}</table>` : `<div class="empty">Сделок пока не было</div>`;
+
+  const runs = [...j.runs].reverse().slice(0, 60);
+  document.getElementById("runs").innerHTML = runs.length ? runs.map(r => `<div class="card run">
+    <div class="head"><strong>${fmtT(r.t)}</strong>${r.alert ? `<span class="alert">${esc(r.alert)}</span>` : ""}</div>
+    <div>${esc(r.summary)}</div>
+    ${(r.decisions || []).length ? `<ul>${r.decisions.map(d =>
+      `<li><strong>${esc(d.instrument)}</strong> — <span class="chip">${esc(d.action)}</span> ${esc(d.why)}</li>`).join("")}</ul>` : ""}
+    ${(r.news || []).length ? `<details style="margin-top:8px"><summary>новости</summary><ul>${
+      r.news.map(n => `<li>${esc(n)}</li>`).join("")}</ul></details>` : ""}
+  </div>`).join("") : `<div class="empty">Запусков пока не было</div>`;
+}
+</script>
+</body>
+</html>
